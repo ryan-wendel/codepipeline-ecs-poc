@@ -105,7 +105,7 @@ function renameKey( object, oldKey, newKey ) {
 app.get('/', async function (request, reply) {
     // always return JSON
     reply.header('Content-Type', 'application/json; charset=utf-8');
-    reply.code(200).send('{ "message":"Hello world - updated!" }');
+    reply.code(200).send('{ "message":"Hello world" }');
     return;
 })
 
