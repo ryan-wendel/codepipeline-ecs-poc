@@ -1,0 +1,1030 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+
+  # General:
+  NamingPrefix:
+    Type: String
+    Description: The naming prefix for resources created by this template, and exported values that can be referenced by other stacks.
+    
+  VPCIPv4CidrBlock:
+    Description: VPC CIDR block for IPv4. Default of 10.0.0.0/16 is recommended for testing.
+    Type: String
+    Default: 10.0.0.0/16
+    
+  VPCSubnetIPv4Size:
+    Description: Host bit mask length of each subnet, e.g. default of 4 will be a /28 subnet size.
+    Type: Number
+    Default: 8
+    
+  VPCNumberOfIPv4Subnets:
+    Description: Number of equally sized IPv4 subnets that will be created within the VPC CIDR block. 
+    Type: Number
+    Default: 256
+    
+  AvailabilityZone1:
+    Description: First AZ used by the system.
+    Type: AWS::EC2::AvailabilityZone::Name
+    
+  AvailabilityZone2:
+    Description: Second AZ used by the system.
+    Type: AWS::EC2::AvailabilityZone::Name
+    
+  AvailabilityZoneBastion:
+    Description: AZ used by the bastion.
+    Type: AWS::EC2::AvailabilityZone::Name
+    
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t1.micro
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t2.medium
+    ConstraintDescription: Must be a valid EC2 instance type.
+    
+  WebBucketName:
+    Description: Name of bucket used for the front-end.
+    Type: String
+    AllowedPattern: "(?=^.{3,63}$)(?!^(\\d+\\.)+\\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\\-]*[a-z0-9])\\.)*([a-z0-9]|[a-z0-9][a-z0-9\\-]*[a-z0-9])$)"
+    ConstraintDescription: Must follow valid bucket naming conventions.
+
+  KeyName:
+    Description: The EC2 Key Pair to allow SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+
+  SafeNetwork:
+    Description: The IP address range that can be used to SSH to bastion hosts.
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Must be a valid IP CIDR range of the form x.x.x.x/x.
+    
+      
+Metadata:
+
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - 
+        Label: 
+          default: "General Configuration"
+        Parameters:
+          - NamingPrefix
+          - VPCIPv4CidrBlock
+          - VPCSubnetIPv4Size
+          - VPCNumberOfIPv4Subnets
+          - AvailabilityZone1
+          - AvailabilityZone2
+          - AvailabilityZoneBastion
+          - InstanceType
+          - SafeNetwork
+          - KeyName
+          - WebBucketName
+
+Mappings:
+
+  ECSInstanceRegionMap:
+  # ECS Optimized AMIs (didn't work for some reason)
+    us-east-1: 
+      "HVM64": "ami-088beb3aba8c353f1"
+    us-east-2: 
+      "HVM64": "ami-0888e1d90572c95b6"
+    us-west-1: 
+      "HVM64": "ami-0f678e27648aa0093"
+    us-west-2: 
+      "HVM64": "ami-0e735c9fbcca3efed"
+      
+  InstanceRegionMap:
+  # Regular AWS Linux 2 AMIs 
+    us-east-1: 
+      "HVM64": "ami-047a51fa27710816e"
+    us-east-2: 
+      "HVM64": "ami-01aab85a5e4a5a0fe"
+    us-west-1: 
+      "HVM64": "ami-005c06c6de69aee84"
+    us-west-2: 
+      "HVM64": "ami-0e999cbd62129e3b1"
+
+Resources:
+          
+  #
+  # S3 Bucket for React front-end
+  #
+  WebBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub '${WebBucketName}'
+      Tags:
+        - Key: Name
+          Value: !Sub '${WebBucketName}'
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Id: WebBucketPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: 
+              - !Sub 
+                - '${BucketArn}/*'
+                - { BucketArn: !GetAtt WebBucket.Arn }
+
+  #
+  # VPC
+  #   
+  VPC:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc.html
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: !Ref VPCIPv4CidrBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-VPC'
+    
+  #
+  # Internet Gateway
+  #    
+  IGW:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-internetgateway.html
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-IGW'
+              
+  IGWAttach:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc-gateway-attachment.html
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref IGW
+      #VpnGatewayId
+   
+  #
+  # Route Stuffs
+  #   
+  RouteTableInternet:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route-table.html
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Internet'
+              
+  RouteTablePrivate:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route-table.html
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Private'
+              
+  RouteInternet:
+    Type: 'AWS::EC2::Route'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route.html
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      #DestinationIpv6CidrBlock: ::/0
+      #EgressOnlyInternetGatewayId
+      GatewayId: !Ref IGW
+      #InstanceId
+      #NatGatewayId
+      #NetworkInterfaceId
+      RouteTableId: !Ref RouteTableInternet
+      #VpcPeeringConnectionId
+      
+  RoutePrivate:
+    Type: AWS::EC2::Route
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route.html
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      #DestinationIpv6CidrBlock: ::/0
+      #EgressOnlyInternetGatewayId
+      #GatewayId
+      #InstanceId
+      NatGatewayId: !Ref NATGateway
+      #NetworkInterfaceId
+      RouteTableId: !Ref RouteTablePrivate
+      #VpcPeeringConnectionId
+              
+  RouteTableAssocBastion:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetBastion
+      - RouteTableInternet
+    Properties:
+      RouteTableId: !Ref RouteTableInternet
+      SubnetId: !Ref SubnetBastion
+      
+  RouteTableAssocPublic1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetPublic1
+      - RouteTableInternet
+    Properties:
+      RouteTableId: !Ref RouteTableInternet
+      SubnetId: !Ref SubnetPublic1
+      
+  RouteTableAssocPublic2:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetPublic2
+      - RouteTableInternet
+    Properties:
+      RouteTableId: !Ref RouteTableInternet
+      SubnetId: !Ref SubnetPublic2
+
+  RouteTableAssocPrivate1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetPrivate1
+      - RouteTablePrivate
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      SubnetId: !Ref SubnetPrivate1
+      
+  RouteTableAssocPrivate2:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetPrivate2
+      - RouteTablePrivate
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      SubnetId: !Ref SubnetPrivate2
+      
+  RouteTableAssocMongo1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetMongo1
+      - RouteTablePrivate
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      SubnetId: !Ref SubnetMongo1
+
+  RouteTableAssocMongo2:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetMongo2
+      - RouteTablePrivate
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      SubnetId: !Ref SubnetMongo2
+      
+  
+  #
+  # Subnets
+  #  
+  SubnetBastion:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZoneBastion
+      CidrBlock: !Select [ 0, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Bastion'
+                            
+  SubnetPublic1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone1
+      CidrBlock: !Select [ 1, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Public-1'
+              
+  SubnetPublic2:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone2
+      CidrBlock: !Select [ 2, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Public-2'
+              
+  SubnetPrivate1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone1
+      CidrBlock: !Select [ 3, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Private-1'
+              
+  SubnetPrivate2:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone2
+      CidrBlock: !Select [ 4, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Private-2'
+              
+  SubnetMongo1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone1
+      CidrBlock: !Select [ 5, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Mongo-1'
+
+  SubnetMongo2:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone2
+      CidrBlock: !Select [ 6, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Mongo-2'
+    
+  #
+  # Network ACLs
+  #    
+  NetworkAclBastion:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Bastion'
+          
+  AclAssocationBastion:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetBastion
+      NetworkAclId: !Ref NetworkAclBastion
+      
+  AclEntryBastion:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclBastion
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+        
+  AclEgressBastion:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclBastion
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+        
+  NetworkAclPublic:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Public'
+          
+  AclAssocationPublic1:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPublic1
+      NetworkAclId: !Ref NetworkAclPublic
+      
+  AclAssocationPublic2:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPublic2
+      NetworkAclId: !Ref NetworkAclPublic
+        
+  AclEntryPublic:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPublic
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+
+  AclEgressPublic:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPublic
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: '1'
+        To: '65535' 
+
+  NetworkAclPrivate:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Private'
+          
+  AclAssocationPrivate1:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPrivate1
+      NetworkAclId: !Ref NetworkAclPrivate
+
+  AclAssocationPrivate2:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPrivate2
+      NetworkAclId: !Ref NetworkAclPrivate
+      
+  AclEntryPrivate:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPrivate
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+      
+  AclEgressPrivate:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPrivate
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+        
+  NetworkAclMongo:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Mongo'
+          
+  AclAssocationMongo1:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetMongo1
+      NetworkAclId: !Ref NetworkAclMongo
+
+  AclAssocationMongo2:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetMongo2
+      NetworkAclId: !Ref NetworkAclMongo
+      
+  AclEntryMongo:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclMongo
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+        
+  AclEgressMongo:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclMongo
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+     
+  #
+  # Security Groups
+  #
+  SecurityGroupBastion:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${NamingPrefix}-Bastion'
+      GroupDescription: Allows connections to bastion instances
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Bastion'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: !Ref SafeNetwork
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: !Ref SafeNetwork
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: !Ref SafeNetwork
+        
+  SecurityGroupElb:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${NamingPrefix}-ELB'
+      GroupDescription: Allows connections to ELB
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-ELB'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: !Ref SafeNetwork
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: !Ref SafeNetwork
+        
+  SecurityGroupPublic:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${NamingPrefix}-Public'
+      GroupDescription: Allow connections to EC2 instances in public subnet
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Public'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 1
+        ToPort: 65535
+        SourceSecurityGroupId: !Ref SecurityGroupBastion
+      - IpProtocol: tcp
+        FromPort: 1
+        ToPort: 65535
+        SourceSecurityGroupId: !Ref SecurityGroupElb
+      - IpProtocol: tcp
+        FromPort: 1
+        ToPort: 65535
+        SourceSecurityGroupId: !Ref SecurityGroupPrivate
+
+  SecurityGroupPrivate:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${NamingPrefix}-Private'
+      GroupDescription: Allow connections to EC2 instances in private subnet
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Private'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 1
+        ToPort: 65535
+        SourceSecurityGroupId: !Ref SecurityGroupBastion
+      - IpProtocol: tcp
+        FromPort: 32768
+        ToPort: 65535
+        SourceSecurityGroupId: !Ref SecurityGroupElb
+
+  SecurityGroupMongo:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${NamingPrefix}-Mongo'
+      GroupDescription: Allows connections to mongodb instance
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Mongo'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        SourceSecurityGroupId: !Ref SecurityGroupBastion
+      - IpProtocol: tcp
+        FromPort: 27017
+        ToPort: 27017
+        SourceSecurityGroupId: !Ref SecurityGroupPrivate
+
+  #
+  # NAT Gateway
+  #
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: NATGatewayEIP
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-natgateway.html
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref SubnetPublic1
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-NATGateway'
+  
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: VPC
+      
+  #
+  # Database Instance
+  #
+  MongoInstance:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-instance.html
+    Type: AWS::EC2::Instance
+    DependsOn: 
+      - RouteTableInternet
+      - RouteTablePrivate
+      - SubnetMongo1
+      - SubnetMongo2
+      - SecurityGroupMongo 
+      - NATGateway
+    Properties:
+      SubnetId: !Ref SubnetMongo1
+      Tags: 
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-MongoDB'          
+      KeyName:
+        !Ref KeyName
+      DisableApiTermination: false
+      Monitoring: false
+      ImageId:
+        !FindInMap [InstanceRegionMap, !Ref "AWS::Region", HVM64]
+      SecurityGroupIds:
+        - !Ref SecurityGroupMongo
+      InstanceType:
+        !Ref InstanceType
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          echo -n 'W21vbmdvZGItb3JnLTQuNF0KbmFtZT1Nb25nb0RCIFJlcG9zaXRvcnkKYmFzZXVybD1odHRwczovL3JlcG8ubW9uZ29kYi5vcmcveXVtL2FtYXpvbi8yL21vbmdvZGItb3JnLzQuNC94ODZfNjQvCmdwZ2NoZWNrPTEKZW5hYmxlZD0xCmdwZ2tleT1odHRwczovL3d3dy5tb25nb2RiLm9yZy9zdGF0aWMvcGdwL3NlcnZlci00LjQuYXNjCg==' | base64 -d > /etc/yum.repos.d/mongodb-org.repo
+          yum install -y htop mongodb-org
+          # Make MongoDB listen on all interfaces
+          sed -i 's/bindIp: 127.0.0.1/bindIp: 0.0.0.0/' /etc/mongod.conf
+          # Enable and start MongoDB
+          systemctl enable mongod
+          systemctl start mongod
+          # Create Mongo collections and insert a few documents
+          echo 'dXNlIHMzdXBsb2FkCmRiLmNyZWF0ZUNvbGxlY3Rpb24oICdmaWxlVHlwZXMnLCB7fSApCmRiLmNyZWF0ZUNvbGxlY3Rpb24oICdmaWxlcycsIHt9ICkKZGIuY3JlYXRlQ29sbGVjdGlvbiggJ29yaWdpbnMnLCB7fSApCmRiLmZpbGVUeXBlcy5pbnNlcnRPbmUoewogICAgICAgICJ0eXBlIjogImJvb2siLAogICAgICAgICJ0ZXh0IjogIkJvb2tzIiwKICAgICAgICAiaGVscCI6ICJCb29rcyBtdXN0IG1lIGluIFBERiBmb3JtYXQuIE1heCBmaWxlIHNpemUgaXMgMU1CLiIsCiAgICAgICAgImV4dGVuc2lvbnMiOiBbICJwZGYiIF0sCiAgICAgICAgIm1pbWV0eXBlcyI6IFsgImFwcGxpY2F0aW9uL3BkZiIgXSwKICAgICAgICAiYnVja2V0IjoiZm9vLnJ5YW53ZW5kZWwuY29tIiwKICAgICAgICAicGF0aCI6ImJvb2tzIgogICAgfQopCmRiLmZpbGVUeXBlcy5pbnNlcnRPbmUoewogICAgICAgICJ0eXBlIjogImltYWdlIiwKICAgICAgICAidGV4dCI6ICJJbWFnZXMiLAogICAgICAgICJoZWxwIjogIkltYWdlcyBtdXN0IGJlIGluIEpQRywgSlBFRywgUE5HLCBvciBHSUYgZm9ybWF0LiBNYXggZmlsZSBzaXplIGlzIDFNQi4iLAogICAgICAgICJleHRlbnNpb25zIjogWyAianBnIiwgImpwZWciLCAicG5nIiwgImdpZiIgXSwKICAgICAgICAibWltZXR5cGVzIjogWyAiaW1hZ2UvanBlZyIsICJpbWFnZS9wbmciLCAiaW1hZ2UvZ2lmIiBdLAogICAgICAgICJidWNrZXQiOiJiYXIucnlhbndlbmRlbC5jb20iLAogICAgICAgICJwYXRoIjoiZmlsZXMvaW1hZ2VzIgogICAgfQopCg==' | base64 -d | mongo
+          # Insert an origin document to help with CORS
+          echo -e 'use s3upload\ndb.origins.insertOne({"origin": "http://${WebBucketName}.s3-website.${AWS::Region}.amazonaws.com"})' | mongo
+          # Finish up by setting passwords on everything
+          echo 'dXNlIHMzdXBsb2FkCmRiLmNyZWF0ZVVzZXIoewogICAgICAgIHVzZXI6ICJzM3VwbG9hZCIsCiAgICAgICAgcHdkOiAiUzNVcGxvYWRCQlEiLAogICAgICAgIHJvbGVzOiBbIHsgcm9sZTogInJlYWRXcml0ZSIsIGRiOiAiczN1cGxvYWQiIH0gXQogICAgfQopCnVzZSBhZG1pbgpkYi5jcmVhdGVVc2VyKHsKICAgICAgICB1c2VyOiAicm9vdCIsCiAgICAgICAgcHdkOiAiQmFkUGFzc3dvcmQxMjMhIiwKICAgICAgICByb2xlczogWyB7IHJvbGU6ICJ1c2VyQWRtaW5BbnlEYXRhYmFzZSIsIGRiOiAiYWRtaW4iIH0sICJyZWFkV3JpdGVBbnlEYXRhYmFzZSIgXQogICAgfQopCg==' | base64 -d | mongo
+          # Enable security for MongoDB
+          echo -e 'security:\n    authorization: enabled' >> /etc/mongod.conf
+          # Restart MongoDB
+          systemctl restart mongod
+
+  #
+  # Bastion Instance
+  #
+  BastionInstance:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-instance.html
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - RouteTableInternet
+      - RouteTablePrivate
+      - SubnetBastion
+      - SecurityGroupBastion
+      - NATGateway
+    Properties:
+      SubnetId: !Ref SubnetBastion
+      Tags: 
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Bastion'          
+      KeyName:
+        !Ref KeyName
+      DisableApiTermination: false
+      Monitoring: false
+      ImageId:
+        !FindInMap [InstanceRegionMap, !Ref "AWS::Region", HVM64]
+      SecurityGroupIds:
+        - !Ref SecurityGroupBastion
+      InstanceType:
+        !Ref InstanceType
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum install -y htop
+          
+  BastionEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref BastionInstance
+      Domain: VPC
+      
+  #
+  # ECS Stuffs
+  #
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties: 
+      ClusterName: !Sub '${NamingPrefix}-Cluster'
+      Tags: 
+        - Key: Name
+      Tags: 
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Cluster'
+
+  #
+  # ECS Task Execution Role
+  #
+  ECSTaskExecutionRole:
+  # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+                
+  #
+  # ECS Task Role
+  #
+  ECSTaskRole:
+  # https://docs.aws.amazon.com/AmazonECS/latest/userguide/task-iam-roles.html
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - ecs-tasks.amazonaws.com
+          Action:
+            - 'sts:AssumeRole'
+      Path: /
+      Policies:
+      - PolicyName: S3AccessPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 's3:GetObject'
+                - 's3:PutObject'
+                - 's3:PutObjectAcl'
+                - 's3:DeleteObject'
+              Resource:
+                - 'arn:aws:s3:::foo.ryanwendel.com/books/*'
+                - 'arn:aws:s3:::bar.ryanwendel.com/files/images/*'
+          
+  #
+  # Instance Role
+  #
+  InstanceRole:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-iam-role.html
+    # https://docs.amazonaws.cn/en_us/AmazonECS/latest/developerguide/instance_IAM_role.html
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - ec2.amazonaws.com
+          Action:
+            - 'sts:AssumeRole'
+      Path: /
+      Policies:
+      - PolicyName: ECSServicePolicy
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'ec2:DescribeTags'
+              - 'ecs:DeregisterContainerInstance'
+              - 'ecs:DiscoverPollEndpoint'
+              - 'ecs:Poll'
+              - 'ecs:RegisterContainerInstance'
+              - 'ecs:StartTelemetrySession'
+              - 'ecs:UpdateContainerInstancesState'
+              - 'ecs:Submit*'
+              - 'ecr:GetAuthorizationToken'
+              - 'ecr:BatchCheckLayerAvailability'
+              - 'ecr:GetDownloadUrlForLayer'
+              - 'ecr:BatchGetImage'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents' 
+            Resource: '*'
+
+  #
+  # Instance Profile
+  #
+  InstanceProfile:
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-iam-instanceprofile.html
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref InstanceRole
+
+  ECSInstance1:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-instance.html
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - RouteTableInternet
+      - RouteTablePrivate
+      - SubnetPrivate1
+      - SecurityGroupPrivate
+      - NATGateway
+    Properties:
+      IamInstanceProfile:
+        !Ref InstanceProfile
+      SubnetId:
+        !Ref SubnetPrivate1
+      Tags: 
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-ECS-1'          
+      KeyName:
+        !Ref KeyName
+      DisableApiTermination: false
+      Monitoring: false
+      ImageId:
+        !FindInMap [InstanceRegionMap, !Ref "AWS::Region", HVM64]
+      SecurityGroupIds:
+        - !Ref SecurityGroupPrivate
+      InstanceType:
+        !Ref InstanceType
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          amazon-linux-extras install -y ecs
+          echo ECS_CLUSTER='${NamingPrefix}-Cluster' >> /etc/ecs/ecs.config
+          echo ECS_ENABLE_TASK_IAM_ROLE=true >> /etc/ecs/ecs.config
+          echo ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true >> /etc/ecs/ecs.config
+          systemctl enable --now --no-block docker.service
+          systemctl enable --now --no-block ecs.service
+          #yum install -y aws-cfn-bootstrap
+          #/opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource  --region ${AWS::Region}
+      
+  ECSInstance2:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-instance.html
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - RouteTableInternet
+      - RouteTablePrivate
+      - SubnetPrivate2
+      - SecurityGroupPrivate
+      - NATGateway
+    Properties:
+      IamInstanceProfile:
+        !Ref InstanceProfile
+      SubnetId:
+        !Ref SubnetPrivate2
+      Tags: 
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-ECS-2'          
+      KeyName:
+        !Ref KeyName
+      DisableApiTermination: false
+      Monitoring: false
+      ImageId:
+        !FindInMap [InstanceRegionMap, !Ref "AWS::Region", HVM64]
+      SecurityGroupIds:
+        - !Ref SecurityGroupPrivate
+      InstanceType:
+        !Ref InstanceType
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          amazon-linux-extras install -y ecs
+          echo ECS_CLUSTER='${NamingPrefix}-Cluster' >> /etc/ecs/ecs.config
+          echo ECS_ENABLE_TASK_IAM_ROLE=true >> /etc/ecs/ecs.config
+          echo ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true >> /etc/ecs/ecs.config
+          systemctl enable --now --no-block docker.service
+          systemctl enable --now --no-block ecs.service
+          #yum install -y aws-cfn-bootstrap
+          #/opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource InstanceScaleGroup --region ${AWS::Region}
+          
+  #
+  # Load Balancer Stuffs
+  #
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${NamingPrefix}-ELB-1'
+      Type: application
+      Subnets: 
+        - !Ref SubnetPublic1
+        - !Ref SubnetPublic2
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref SecurityGroupElb
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-ELB-1'
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+          
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: LoadBalancer
+    Properties:
+      Name: !Sub '${NamingPrefix}-Target-Group-1'
+      VpcId: !Ref VPC
+      Port: 8000
+      Protocol: HTTP
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Target-Group-1'
+
+#
+# Outputs
+#
+Outputs:
+
+  LoadBalancerUrl:
+    Description: The URL of the App ALB
+    Value: !GetAtt LoadBalancer.DNSName
+    
+  WebBucketURL:
+    Description: URL for website hosted on S3
+    Value: !GetAtt WebBucket.WebsiteURL
+    
+  MongoInstanceIP:
+    Description: Private IP address of the MongoDB Instance
+    Value: !GetAtt MongoInstance.PrivateIp

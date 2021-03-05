@@ -1,0 +1,38 @@
+{
+    "cluster": "ECSDemo-Cluster",
+    "serviceName": "ECSDemo-Service-1",
+    "taskDefinition": "ECSDemo-S3Upload-Task-1",
+    "loadBalancers": [
+        {
+            "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-2:AWS_ACCOUNT_ID:targetgroup/ECSDemo-Target-Group-1/8361d9b8a74dba46",
+            "containerName": "ECSDemo-S3Upload-1",
+            "containerPort": 8000
+        }
+    ],
+    "role": "arn:aws:iam::AWS_ACCOUNT_ID:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS",
+    "launchType": "EC2",
+    "desiredCount": 2,
+    "deploymentConfiguration": {
+        "maximumPercent": 200,
+        "minimumHealthyPercent": 100
+    },
+    "placementStrategy": [
+        {
+            "type": "spread",
+            "field": "attribute:ecs.availability-zone"
+        },
+        {
+            "type": "spread",
+            "field": "instanceId"
+        }
+    ],
+    "healthCheckGracePeriodSeconds": 0,
+    "schedulingStrategy": "REPLICA",
+    "enableECSManagedTags": true,
+    "tags": [
+        {
+            "key": "Owner",
+            "value": "Ryan"
+        }
+    ]
+}

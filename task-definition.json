@@ -1,0 +1,27 @@
+{
+  "family": "ECSDemo-S3Upload-Task-1",
+  "executionRoleArn":"arn:aws:iam::AWS_ACCOUNT_ID:role/ECSDemo-ECSTaskExecutionRole-1NLKOFIX61YQA",
+  "taskRoleArn":"arn:aws:iam::AWS_ACCOUNT_ID:role/ECSDemo-ECSTaskRole-DGCSLGJBWEH7",
+  "containerDefinitions": [
+    {
+      "name": "ECSDemo-S3Upload-1",
+      "image": "AWS_ACCOUNT_ID.dkr.ecr.us-east-2.amazonaws.com/s3upload2:seed",
+      "cpu": 128,
+      "memoryReservation": 128,
+      "portMappings": [
+        {
+          "hostPort": 0,
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true,
+      "environment": [
+        {
+          "name": "AWS_REGION",
+          "value": "us-east-2"
+        }
+      ]        
+    }
+  ]
+}

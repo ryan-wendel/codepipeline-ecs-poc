@@ -1,0 +1,31 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws --version
+      - ECS_CONTAINER="ECSDemo-S3Upload-1"
+      - REPO_NAME=s3upload2
+      - REPO_HOST=AWS_ACCOUNT_ID.dkr.ecr.us-east-2.amazonaws.com
+      - REPO_URI=${REPO_HOST}/${REPO_NAME}
+      - ECR_PASSWORD=$(aws ecr get-login-password --region ${AWS_DEFAULT_REGION})
+      - docker login -u AWS -p ${ECR_PASSWORD} ${REPO_HOST}
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${COMMIT_HASH:=latest}
+  build:
+    commands:
+      - echo Build started on $(date)
+      - echo Building the Docker image...
+      - docker build -t $REPO_URI:latest .
+      - docker tag $REPO_URI:latest $REPO_URI:$IMAGE_TAG
+  post_build:
+    commands:
+      - echo Build completed on $(date)
+      - echo Pushing the Docker images...
+      - docker push $REPO_URI:latest
+      - docker push $REPO_URI:$IMAGE_TAG
+      - echo Writing image definitions file...
+      - echo "[{\"name\":\"${ECS_CONTAINER}\",\"imageUri\":\"${REPO_URI}:${IMAGE_TAG}\"}]" > imagedefs.json
+artifacts:
+  files: imagedefs.json
